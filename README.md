@@ -31,7 +31,7 @@ Ensure Python 3.8 or higher is installed on your machine.
 ## Installation & Setup
 1. Clone the repository:
    ```
-   git clone <your-repository-url>
+   git clone <https://github.com/Maradani-Ratnakarun/Transparent-Ethical-DSS>
    cd xai-financial-systems
    
 2. Install dependencies:
