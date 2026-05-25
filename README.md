@@ -1,6 +1,6 @@
 # Transparent-Ethical-DSS
 An explainable deep learning model that balances high predictive performance with robust interpretability for critical, high-stakes decisions.
-# Explainable AI (XAI) for Financial Systems
+# Explainable AI (XAI) for Transparent and Ethical Decision Support Systems
 
 ## Overview
 This project provides a transparent neural network pipeline tailored for the finance sector, specifically targeting loan approval processes. It breaks down complex deep learning predictions into clear, human-readable insights. By leveraging advanced interpretability methods, this repository ensures that every automated decision can be easily understood and audited for ethical compliance.
