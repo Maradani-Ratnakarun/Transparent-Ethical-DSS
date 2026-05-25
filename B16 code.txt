@@ -1,0 +1,491 @@
+#Requirements.txt
+torch
+torchvision
+flask
+joblib
+shap
+lime
+numpy
+pandas
+matplotlib
+seaborn
+scikit-learn
+
+
+#train_model.py(For Training The Model)
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import pandas as pd
+import numpy as np
+import joblib
+import matplotlib.pyplot as plt
+
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import (
+    confusion_matrix,
+    ConfusionMatrixDisplay,
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score
+)
+
+# -------------------------------
+# Neural Network Architecture
+# -------------------------------
+class ExplainableDSSModel(nn.Module):
+
+    def __init__(self, input_dim):
+
+        super(ExplainableDSSModel, self).__init__()
+
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 32),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(32, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+
+        return self.net(x)
+
+
+# -------------------------------
+# Model Training Function
+# -------------------------------
+def train():
+
+    try:
+
+        df = pd.read_csv("loan_approval_dataset.csv")
+
+    except FileNotFoundError:
+
+        print("Dataset not found.")
+        return
+
+    df.columns = df.columns.str.strip()
+
+    y = (
+        df['loan_status'].str.strip() == 'Approved'
+    ).astype(float).values
+
+    features = [
+        'income_annum',
+        'cibil_score',
+        'loan_amount',
+        'loan_term'
+    ]
+
+    X = df[features].values
+
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X,
+        y,
+        test_size=0.2,
+        random_state=42
+    )
+
+
+    scaler = StandardScaler()
+
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+
+
+    model = ExplainableDSSModel(len(features))
+
+    criterion = nn.BCELoss()
+
+    optimizer = optim.Adam(
+        model.parameters(),
+        lr=0.01
+    )
+
+
+    print("Training Started")
+
+    for epoch in range(100):
+
+        model.train()
+
+        inputs = torch.tensor(
+            X_train_scaled,
+            dtype=torch.float32
+        )
+
+        labels = torch.tensor(
+            y_train,
+            dtype=torch.float32
+        ).reshape(-1, 1)
+
+
+        optimizer.zero_grad()
+
+        outputs = model(inputs)
+
+        loss = criterion(outputs, labels)
+
+        loss.backward()
+
+        optimizer.step()
+
+
+        if epoch % 20 == 0:
+
+            print(
+                f"Epoch {epoch} | Loss: {loss.item():.4f}"
+            )
+
+
+    # -------------------------------
+    # Evaluation
+    # -------------------------------
+    model.eval()
+
+    with torch.no_grad():
+
+        test_inputs = torch.tensor(
+            X_test_scaled,
+            dtype=torch.float32
+        )
+
+        y_prob = model(test_inputs).numpy()
+
+        y_pred = (y_prob > 0.5).astype(int)
+
+
+    acc = accuracy_score(y_test, y_pred)
+    prec = precision_score(y_test, y_pred)
+    rec = recall_score(y_test, y_pred)
+    f1 = f1_score(y_test, y_pred)
+
+
+    print("\nModel Performance")
+
+    print("Accuracy:", acc)
+    print("Precision:", prec)
+    print("Recall:", rec)
+    print("F1 Score:", f1)
+
+
+    torch.save(model.state_dict(), "model.pth")
+
+    joblib.dump(scaler, "scaler.pkl")
+
+    joblib.dump(
+        X_train_scaled[:100],
+        "background.pkl"
+    )
+
+    joblib.dump(
+        X_train_scaled,
+        "training_data.pkl"
+    )
+
+
+    cm = confusion_matrix(y_test, y_pred)
+
+    disp = ConfusionMatrixDisplay(
+        confusion_matrix=cm,
+        display_labels=['Rejected', 'Approved']
+    )
+
+    plt.figure(figsize=(6,6))
+
+    disp.plot(cmap='Blues')
+
+    plt.title("Confusion Matrix")
+
+    plt.savefig("confusion_matrix.png")
+
+    plt.close()
+
+
+if __name__ == "__main__":
+    train()
+
+
+#app.py(To Run The Model)
+import io, base64, torch, joblib, shap, lime, lime.lime_tabular
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from flask import Flask, render_template, request
+from train_model import ExplainableDSSModel
+
+app = Flask(__name__)
+plt.switch_backend('Agg')
+
+# -------------------------------
+# Load Saved Model Components
+# -------------------------------
+scaler = joblib.load("scaler.pkl")
+background = joblib.load("background.pkl")
+training_data = joblib.load("training_data.pkl")
+
+model = ExplainableDSSModel(4)
+model.load_state_dict(torch.load("model.pth"))
+model.eval()
+
+# -------------------------------
+# Prediction Function
+# -------------------------------
+def model_predict_probs(data):
+    data_tensor = torch.tensor(data, dtype=torch.float32)
+
+    with torch.no_grad():
+        p = model(data_tensor).numpy()
+
+    # Returns probability of rejection and approval
+    return np.hstack((1-p, p))
+
+
+# -------------------------------
+# Global Explainability Objects
+# -------------------------------
+shap_explainer = shap.KernelExplainer(
+    lambda x: model_predict_probs(x)[:, 1], background
+)
+
+lime_explainer = lime.lime_tabular.LimeTabularExplainer(
+    training_data,
+    feature_names=["Income", "CIBIL Score", "Loan Amount", "Loan Term"],
+    class_names=['Rejected', 'Approved'],
+    mode='classification'
+)
+
+
+# -------------------------------
+# Home Route
+# -------------------------------
+@app.route('/')
+def home():
+    return render_template('index.html')
+
+
+# -------------------------------
+# Prediction Route
+# -------------------------------
+@app.route('/predict', methods=['POST'])
+def predict():
+
+    try:
+
+        f = request.form
+
+        user_inputs = {
+            'income': f['income'],
+            'cibil': f['cibil'],
+            'loan': f['loan'],
+            'term': f['term']
+        }
+
+        raw = np.array([[
+            float(f['income']),
+            float(f['cibil']),
+            float(f['loan']),
+            float(f['term'])
+        ]])
+
+        scaled = scaler.transform(raw)
+
+        # Model prediction
+        prob = model_predict_probs(scaled)[0][1]
+        result = "Approved" if prob > 0.5 else "Rejected"
+
+
+        # -------------------------------
+        # Explainability
+        # -------------------------------
+        shap_vals = shap_explainer.shap_values(
+            scaled,
+            nsamples=100
+        ).flatten()
+
+        lime_exp = lime_explainer.explain_instance(
+            scaled[0],
+            model_predict_probs,
+            num_features=4
+        )
+
+        lime_vals = [val for _, val in lime_exp.as_list()]
+
+
+        # -------------------------------
+        # Human Readable Explanation
+        # -------------------------------
+        features = [
+            "Annual Income",
+            "CIBIL Score",
+            "Loan Amount",
+            "Loan Term"
+        ]
+
+        top_pos_idx = np.argmax(shap_vals)
+        top_neg_idx = np.argmin(shap_vals)
+
+        t_pos = features[top_pos_idx]
+        t_neg = features[top_neg_idx]
+
+        if result == "Approved":
+
+            explanation = (
+                f"The system **Approved** this loan because your "
+                f"**{t_pos}** is very strong, which outweighed the "
+                f"risk from your {t_neg}."
+            )
+
+        else:
+
+            explanation = (
+                f"The system **Rejected** this loan primarily due to "
+                f"your **{t_neg}**. Even though your {t_pos} was a "
+                f"positive factor, it was not enough to offset the risk."
+            )
+
+
+        # -------------------------------
+        # Visualization
+        # -------------------------------
+        plt.clf()
+
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+
+        sns.barplot(
+            x=shap_vals,
+            y=features,
+            ax=ax1,
+            palette="RdBu"
+        )
+
+        ax1.set_title("SHAP (Global Consistency)")
+
+
+        sns.barplot(
+            x=lime_vals,
+            y=features,
+            ax=ax2,
+            palette="viridis"
+        )
+
+        ax2.set_title("LIME (Local Reason)")
+
+
+        plt.tight_layout()
+
+        buf = io.BytesIO()
+
+        plt.savefig(
+            buf,
+            format='png',
+            bbox_inches='tight'
+        )
+
+        plot_url = base64.b64encode(
+            buf.getvalue()
+        ).decode('utf-8')
+
+
+        return render_template(
+            'index.html',
+            result=result,
+            prob=f"{prob*100:.1f}%",
+            plot=plot_url,
+            explanation=explanation,
+            user_inputs=user_inputs
+        )
+
+    except Exception as e:
+        return f"Error during inference: {str(e)}"
+
+
+if __name__ == '__main__':
+    app.run(debug=True)
+
+#index.html(user interface)
+<!DOCTYPE html>
+<html>
+<head>
+    <title>XAI Decision Support</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <style>
+        body { background: #f8f9fa; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        .main-card { border: none; border-radius: 20px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); }
+        .header-section { background: #1a2a6c; color: white; padding: 30px; border-radius: 20px 20px 0 0; }
+        .explanation-box { background: #ffffff; border-left: 5px solid #1a2a6c; padding: 20px; border-radius: 10px; }
+    </style>
+</head>
+<body>
+<div class="container py-5">
+    <div class="card main-card">
+        <div class="header-section text-center">
+            <h1>Explainable AI (XAI) for Financial Systems</h1>
+            <p>Deep Learning Model for Transparent & Ethical Loan Approval</p>
+        </div>
+        
+        <div class="card-body p-4">
+            <form action="/predict" method="post" class="row g-3 mb-4">
+                <div class="col-md-3">
+                    <label class="form-label">Annual Income (₹)</label>
+                    <input type="number" name="income" class="form-control" 
+                        value="{{ user_inputs.income if user_inputs else '600000' }}" required>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label">CIBIL Score</label>
+                    <input type="number" name="cibil" class="form-control" 
+                        value="{{ user_inputs.cibil if user_inputs else '750' }}" required>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label">Loan Amount (₹)</label>
+                    <input type="number" name="loan" class="form-control" 
+                        value="{{ user_inputs.loan if user_inputs else '200000' }}" required>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label">Term (Years)</label>
+                    <input type="number" name="term" class="form-control" 
+                        value="{{ user_inputs.term if user_inputs else '2' }}" required>
+                </div>
+                <div class="col-12 text-center">
+                    <button type="submit" class="btn btn-primary px-5 btn-lg">Run Explainable Inference</button>
+                </div>
+            </form>
+
+            {% if result %}
+            <hr>
+            <div class="row align-items-center">
+                <div class="col-md-4 text-center">
+                    <div class="p-4 rounded shadow-sm {{ 'bg-success-subtle' if result == 'Approved' else 'bg-danger-subtle' }}">
+                        <h2 class="{{ 'text-success' if result == 'Approved' else 'text-danger' }}">{{ result }}</h2>
+                        <p class="mb-0">Confidence: <strong>{{ prob }}</strong></p>
+                    </div>
+                </div>
+
+                <div class="col-md-8">
+                    <div class="explanation-box shadow-sm">
+                        <h5 class="text-primary">Decision Rationale</h5>
+                        <p class="lead" style="font-size: 1.1rem;">{{ explanation|safe }}</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="mt-5">
+                <h5 class="text-center mb-4 text-secondary">Interpretable AI Analytics (SHAP vs LIME Comparison)</h5>
+                <div class="text-center">
+                    <img src="data:image/png;base64,{{ plot }}" class="img-fluid rounded shadow border">
+                    <p class="mt-3 text-muted small">
+                        Note: <b>SHAP</b> ensures global mathematical consistency, while <b>LIME</b> focuses on local feature perturbations.
+                    </p>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+</body>
+</html>
